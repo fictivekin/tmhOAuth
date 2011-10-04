@@ -1,7 +1,8 @@
 <?php
 
 /**
- * Tweets a message from the user whose user token and secret you use.
+ * Very basic User Streams example. In production you would store the
+ * received tweets in a queue or database for later processing.
  *
  * Although this example uses your user token/secret, you can use
  * the user token/secret of any user who has authorised your application.
@@ -15,10 +16,19 @@
  * 3) From the application details page copy the access token and access token
  *      secret into the place in this code marked with (A_USER_TOKEN
  *      and A_USER_SECRET)
- * 4) Visit this page using your web browser.
+ * 4) In a terminal or server type:
+ *      php /path/to/here/userstream.php
+ * 5) To stop the Streaming API either press CTRL-C or, in the folder the
+ *      script is running from type:
+ *      touch STOP
  *
  * @author themattharris
  */
+
+function my_streaming_callback($data, $length, $metrics) {
+  echo $data .PHP_EOL;
+  return file_exists(dirname(__FILE__) . '/STOP');
+}
 
 require '../tmhOAuth.php';
 require '../tmhUtilities.php';
@@ -29,14 +39,12 @@ $tmhOAuth = new tmhOAuth(array(
   'user_secret'     => 'A_USER_SECRET',
 ));
 
-$code = $tmhOAuth->request('POST', $tmhOAuth->url('1/statuses/update'), array(
-  'status' => 'My Twitter Message'
-));
+$method = "https://userstream.twitter.com/2/user.json";
+$params = array(
+  // parameters go here
+);
+$tmhOAuth->streaming_request('POST', $method, $params, 'my_streaming_callback', false);
 
-if ($code == 200) {
-  tmhUtilities::pr(json_decode($tmhOAuth->response['response']));
-} else {
-  tmhUtilities::pr($tmhOAuth->response['response']);
-}
-
+// output any response we get back AFTER the Stream has stopped -- or errors
+tmhUtilities::pr($tmhOAuth);
 ?>

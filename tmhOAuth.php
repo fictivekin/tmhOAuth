@@ -7,11 +7,13 @@
  * REST requests. OAuth authentication is sent using the an Authorization Header.
  *
  * @author themattharris
- * @version 0.4
+ * @version 0.56
  *
- * 03 March 2011
+ * 29 September 2011
  */
 class tmhOAuth {
+  const VERSION = 0.56;
+
   /**
    * Creates a new tmhOAuth object
    *
@@ -19,11 +21,14 @@ class tmhOAuth {
    */
   function __construct($config) {
     $this->params = array();
+    $this->headers = array();
     $this->auto_fixed_time = false;
+    $this->buffer = null;
 
     // default configuration options
     $this->config = array_merge(
       array(
+        'user_agent'                 => 'tmhOAuth ' . self::VERSION . ' - //github.com/themattharris/tmhOAuth',
         'consumer_key'               => '',
         'consumer_secret'            => '',
         'user_token'                 => '',
@@ -47,11 +52,17 @@ class tmhOAuth {
         // support for proxy servers
         'curl_proxy'                 => false, // really you don't want to use this if you are using streaming
         'curl_proxyuserpwd'          => false, // format username:password for proxy, if required
+        'curl_encoding'              => '',    // leave blank for all supported formats, else use gzip, deflate, identity
 
         // streaming API
         'is_streaming'               => false,
         'streaming_eol'              => "\r\n",
         'streaming_metrics_interval' => 60,
+
+        // header or querystring. You should always use header
+        // this is just to help me debug other developers
+        // implementations
+        'as_header'                  => true,
       ),
       $config
     );
@@ -70,7 +81,9 @@ class tmhOAuth {
       $sequence = array_merge(range(0,9), range('A','Z'), range('a','z'));
       $length = $length > count($sequence) ? count($sequence) : $length;
       shuffle($sequence);
-      $this->config['nonce'] = md5(substr(microtime() . implode($sequence), 0, $length));
+
+      $prefix = $include_time ? microtime() : '';
+      $this->config['nonce'] = md5(substr($prefix . implode($sequence), 0, $length));
     }
   }
 
@@ -182,6 +195,8 @@ class tmhOAuth {
    * Prepares the URL for use in the base string by ripping it apart and
    * reconstructing it.
    *
+   * Ref: 3.4.1.2
+   *
    * @param string $url the request URL
    * @return void value is stored to a class variable
    * @author themattharris
@@ -189,10 +204,10 @@ class tmhOAuth {
   private function prepare_url($url) {
     $parts = parse_url($url);
 
-    $port = isset($parts['port']) ? $parts['port'] : null;
+    $port   = isset($parts['port']) ? $parts['port'] : false;
     $scheme = $parts['scheme'];
-    $host = $parts['host'];
-    $path = isset($parts['path']) ? $parts['path'] : null;
+    $host   = $parts['host'];
+    $path   = isset($parts['path']) ? $parts['path'] : false;
 
     $port or $port = ($scheme == 'https') ? '443' : '80';
 
@@ -200,7 +215,7 @@ class tmhOAuth {
         || ($scheme == 'http' && $port != '80')) {
       $host = "$host:$port";
     }
-    $this->url = "$scheme://$host$path";
+    $this->url = strtolower("$scheme://$host$path");
   }
 
   /**
@@ -286,11 +301,16 @@ class tmhOAuth {
   private function prepare_auth_header() {
     $this->headers = array();
     uksort($this->auth_params, 'strcmp');
+    if (!$this->config['as_header']) :
+      $this->request_params = array_merge($this->request_params, $this->auth_params);
+      return;
+    endif;
+
     foreach ($this->auth_params as $k => $v) {
       $kv[] = "{$k}=\"{$v}\"";
     }
     $this->auth_header = 'OAuth ' . implode(', ', $kv);
-    $this->headers[] = 'Authorization: ' . $this->auth_header;
+    $this->headers['Authorization'] = $this->auth_header;
   }
 
   /**
@@ -339,48 +359,7 @@ class tmhOAuth {
     $this->create_timestamp();
 
     $this->sign($method, $url, $params, $useauth);
-    return $this->curlit($multipart);
-  }
-
-  /**
-   * Make an HTTP request using this library. This method is different to 'request'
-   * because on a 401 error it will retry the request.
-   *
-   * When a 401 error is returned it is possible the timestamp of the client is
-   * too different to that of the API server. In this situation it is recommended
-   * the request is retried with the OAuth timestamp set to the same as the API
-   * server. This method will automatically try that technique.
-   *
-   * This method doesn't return anything. Instead the response should be
-   * inspected directly.
-   *
-   * @param string $method the HTTP method being used. e.g. POST, GET, HEAD etc
-   * @param string $url the request URL without query string parameters
-   * @param array $params the request parameters as an array of key=value pairs
-   * @param string $useauth whether to use authentication when making the request. Default true.
-   * @param string $multipart whether this request contains multipart data. Default false
-   */
-  function auto_fix_time_request($method, $url, $params=array(), $useauth=true, $multipart=false) {
-    $this->request($method, $url, $params, $useauth, $multipart);
-
-    // if we're not doing auth the timestamp isn't important
-    if ( ! $useauth)
-      return;
-
-    // some error that isn't a 401
-    if ($this->response['code'] != 401)
-      return;
-
-    // some error that is a 401 but isn't because the OAuth token and signature are incorrect
-    // TODO: this check is horrid but helps avoid requesting twice when the username and password are wrong
-    if (stripos($this->response['response'], 'password') !== false)
-     return;
-
-    // force the timestamp to be the same as the Twitter servers, and re-request
-    $this->auto_fixed_time = true;
-    $this->config['force_timestamp'] = true;
-    $this->config['timestamp'] = strtotime($this->response['headers']['date']);
-    $this->request($method, $url, $params, $useauth, $multipart);
+    return $this->curlit();
   }
 
   /**
@@ -449,6 +428,17 @@ class tmhOAuth {
       $this->config['host'],
       $request . $format
     ));
+  }
+
+  /**
+   * Public access to the private safe decode/encode methods
+   *
+   * @param string $text the text to transform
+   * @param string $mode the transformation mode. either encode or decode
+   * @return the string as transformed by the given mode
+   */
+  function transformText($text, $mode='encode') {
+    return $this->{"safe_$mode"}($text);
   }
 
   /**
@@ -539,23 +529,23 @@ class tmhOAuth {
         break;
     }
 
-    if (isset($this->config['prevent_request']) && $this->config['prevent_request'])
-      return;
-
     // configure curl
     $c = curl_init();
-    curl_setopt($c, CURLOPT_USERAGENT, "themattharris' HTTP Client");
-    curl_setopt($c, CURLOPT_CONNECTTIMEOUT, $this->config['curl_connecttimeout']);
-    curl_setopt($c, CURLOPT_TIMEOUT, $this->config['curl_timeout']);
-    curl_setopt($c, CURLOPT_RETURNTRANSFER, TRUE);
-    curl_setopt($c, CURLOPT_SSL_VERIFYPEER, $this->config['curl_ssl_verifypeer']);
-    curl_setopt($c, CURLOPT_FOLLOWLOCATION, $this->config['curl_followlocation']);
-    curl_setopt($c, CURLOPT_PROXY, $this->config['curl_proxy']);
-    curl_setopt($c, CURLOPT_URL, $this->url);
-    // process the headers
-    curl_setopt($c, CURLOPT_HEADERFUNCTION, array($this, 'curlHeader'));
-    curl_setopt($c, CURLOPT_HEADER, FALSE);
-    curl_setopt($c, CURLINFO_HEADER_OUT, true);
+    curl_setopt_array($c, array(
+      CURLOPT_USERAGENT      => $this->config['user_agent'],
+      CURLOPT_CONNECTTIMEOUT => $this->config['curl_connecttimeout'],
+      CURLOPT_TIMEOUT        => $this->config['curl_timeout'],
+      CURLOPT_RETURNTRANSFER => TRUE,
+      CURLOPT_SSL_VERIFYPEER => $this->config['curl_ssl_verifypeer'],
+      CURLOPT_FOLLOWLOCATION => $this->config['curl_followlocation'],
+      CURLOPT_PROXY          => $this->config['curl_proxy'],
+      CURLOPT_ENCODING       => $this->config['curl_encoding'],
+      CURLOPT_URL            => $this->url,
+      // process the headers
+      CURLOPT_HEADERFUNCTION => array($this, 'curlHeader'),
+      CURLOPT_HEADER         => FALSE,
+      CURLINFO_HEADER_OUT    => true,
+    ));
 
     if ($this->config['curl_proxyuserpwd'] !== false)
       curl_setopt($c, CURLOPT_PROXYUSERPWD, $this->config['curl_proxyuserpwd']);
@@ -588,15 +578,22 @@ class tmhOAuth {
       curl_setopt($c, CURLOPT_POSTFIELDS, $this->request_params);
     } else {
       // CURL will set length to -1 when there is no data, which breaks Twitter
-      $this->headers[] = 'Content-Type:';
-      $this->headers[] = 'Content-Length:';
+      $this->headers['Content-Type'] = '';
+      $this->headers['Content-Length'] = '';
     }
 
     // CURL defaults to setting this to Expect: 100-Continue which Twitter rejects
-    $this->headers[] = 'Expect:';
+    $this->headers['Expect'] = '';
 
-    if ( ! empty($this->headers))
-      curl_setopt($c, CURLOPT_HTTPHEADER, $this->headers);
+    if ( ! empty($this->headers)) {
+      foreach ($this->headers as $k => $v) {
+        $headers[] = trim($k . ': ' . $v);
+      }
+      curl_setopt($c, CURLOPT_HTTPHEADER, $headers);
+    }
+
+    if (isset($this->config['prevent_request']) && false == $this->config['prevent_request'])
+      return;
 
     // do it!
     $response = curl_exec($c);
@@ -609,117 +606,6 @@ class tmhOAuth {
     $this->response['response'] = $response;
     $this->response['info'] = $info;
     return $code;
-  }
-
-  /**
-   * Debug function for printing the content of an object
-   *
-   * @param mixes $obj
-   */
-  function pr($obj) {
-    $cli = (PHP_SAPI == 'cli' && empty($_SERVER['REMOTE_ADDR']));
-    if (!$cli)
-      echo '<pre style="word-wrap: break-word">';
-    if ( is_object($obj) )
-      print_r($obj);
-    elseif ( is_array($obj) )
-      print_r($obj);
-    else
-      echo $obj;
-    if (!$cli)
-      echo '</pre>';
-  }
-
-  /**
-   * Returns the current URL. This is instead of PHP_SELF which is unsafe
-   *
-   * @param bool $dropqs whether to drop the querystring or not. Default true
-   * @return string the current URL
-   */
-  function php_self($dropqs=true) {
-    $url = sprintf('%s://%s%s',
-      empty($_SERVER['HTTPS']) ? 'http' : 'https',
-      $_SERVER['SERVER_NAME'],
-      $_SERVER['REQUEST_URI']
-    );
-
-    $parts = parse_url($url);
-
-    $port = $_SERVER['SERVER_PORT'];
-    $scheme = $parts['scheme'];
-    $host = $parts['host'];
-    $path = isset($parts['path']) ? $parts['path'] : null;
-    $qs   = isset($parts['query']) ? $parts['query'] : null;
-
-    $port or $port = ($scheme == 'https') ? '443' : '80';
-
-    if (($scheme == 'https' && $port != '443')
-        || ($scheme == 'http' && $port != '80')) {
-      $host = "$host:$port";
-    }
-    $url = "$scheme://$host$path";
-    if ( ! $dropqs)
-      return "{$url}?{$qs}";
-    else
-      return $url;
-  }
-
-  /**
-   * Entifies the tweet using the given entities element
-   *
-   * @param array $tweet the json converted to normalised array
-   * @return the tweet text with entities replaced with hyperlinks
-   */
-  function entify($tweet) {
-    $keys = array();
-    $replacements = array();
-    $is_retweet = false;
-
-    if (isset($tweet['retweeted_status'])) {
-      $tweet = $tweet['retweeted_status'];
-      $is_retweet = true;
-    }
-
-    if (!isset($tweet['entities'])) {
-      return $tweet['text'];
-    }
-
-    // prepare the entities
-    foreach ($tweet['entities'] as $type => $things) {
-      foreach ($things as $entity => $value) {
-        $tweet_link = "<a href=\"http://twitter.com/{$value['screen_name']}/statuses/{$tweet['id']}\">{$tweet['created_at']}</a>";
-
-        switch ($type) {
-          case 'hashtags':
-            $href = "<a href=\"http://search.twitter.com/search?q=%23{$value['text']}\">#{$value['text']}</a>";
-            break;
-          case 'user_mentions':
-            $href = "@<a href=\"http://twitter.com/{$value['screen_name']}\" title=\"{$value['name']}\">{$value['screen_name']}</a>";
-            break;
-          case 'urls':
-            $url = empty($value['expanded_url']) ? $value['url'] : $value['expanded_url'];
-            $display = isset($value['display_url']) ? $value['display_url'] : str_replace('http://', '', $url);
-            // Not all pages are served in UTF-8 so you may need to do this ...
-            $display = urldecode(str_replace('%E2%80%A6', '&hellip;', urlencode($display)));
-            $href = "<a href=\"{$value['url']}\">{$display}</a>";
-            break;
-        }
-        $keys[$value['indices']['0']] = substr(
-          $tweet['text'],
-          $value['indices']['0'],
-          $value['indices']['1'] - $value['indices']['0']
-        );
-        $replacements[$value['indices']['0']] = $href;
-      }
-    }
-
-    ksort($replacements);
-    $replacements = array_reverse($replacements, true);
-    $entified_tweet = $tweet['text'];
-    foreach ($replacements as $k => $v) {
-      $entified_tweet = substr_replace($entified_tweet, $v, $k, strlen($keys[$k]));
-    }
-    return $entified_tweet;
   }
 }
 

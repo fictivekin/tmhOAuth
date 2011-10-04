@@ -1,8 +1,11 @@
 <?php
 
 /**
- * Very basic streaming API example. In production you would store the
+ * Very basic Site Streams example. In production you would store the
  * received tweets in a queue or database for later processing.
+ *
+ * Site Streams require you to use the user token/secret of the owner
+ * of the application.
  *
  * Instructions:
  * 1) If you don't have one already, create a Twitter application on
@@ -14,7 +17,7 @@
  *      secret into the place in this code marked with (A_USER_TOKEN
  *      and A_USER_SECRET)
  * 4) In a terminal or server type:
- *      php /path/to/here/streaming.php
+ *      php /path/to/here/sitestream.php
  * 5) To stop the Streaming API either press CTRL-C or, in the folder the
  *      script is running from type:
  *      touch STOP
@@ -36,22 +39,14 @@ $tmhOAuth = new tmhOAuth(array(
   'user_secret'     => 'A_USER_SECRET',
 ));
 
-$method = 'https://stream.twitter.com/1/statuses/filter.json';
-
-// show Tweets which contan the word twitter OR have been geo-tagged within
-// the bounding box -122.41,37.77,-122.40,37.78 OR are by themattharris
-
+$method = "https://sitestream.twitter.com/2b/site.json";
 $params = array(
-  'track'     => 'twitter',
-  // Around Twitter HQ. First param is the SW corner of the bounding box
-  'locations' => '-122.41,37.77,-122.40,37.78',
-  'follow'    => '777925' // themattharris
+  // comma seperated list of user_ids who have authorised your application through OAuth
+  'follow' => '777925'
 );
-
 $tmhOAuth->streaming_request('POST', $method, $params, 'my_streaming_callback');
 
 // output any response we get back AFTER the Stream has stopped -- or it errors
 tmhUtilities::pr($tmhOAuth);
-
 ?>
 
